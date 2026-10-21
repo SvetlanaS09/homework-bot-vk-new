@@ -144,62 +144,36 @@ def main() -> None:
     from_date = int(time.time())
 
     last_status: Optional[str] = None
-    last_error_sent_at: Optional[float] = None
-    error_cooldown_seconds = RETRY_PERIOD / 2
 
     while True:
-        try:
-            response = get_api_answer(from_date)
-            check_response(response)
-            homeworks: List[Dict[str, Any]] = response.get('homeworks', [])
-            current_date = response['current_date']
-            from_date = current_date
-            if not homeworks:
-                if last_status is not None:
-                    logging.debug(
-                        'Статус домашних работ не изменился: список пуст'
-                    )
-                else:
-                    logging.debug(
-                        'Список домашних работ пуст, начальное состояние'
-                    )
-                time.sleep(RETRY_PERIOD)
-                continue
-            for homework in homeworks:
-                new_status_message = parse_status(homework)
+        response = get_api_answer(from_date)
+        check_response(response)
+        homeworks: List[Dict[str, Any]] = response.get('homeworks', [])
+        current_date = response['current_date']
+        from_date = current_date
+        if not homeworks:
+            if last_status is not None:
+                logging.debug(
+                    'Статус домашних работ не изменился: список пуст'
+                )
+            else:
+                logging.debug(
+                    'Список домашних работ пуст, начальное состояние'
+                )
+            time.sleep(RETRY_PERIOD)
+            continue
+
+        status_changed = False
+        for homework in homeworks:
+            new_status_message = parse_status(homework)
             if new_status_message != last_status:
-                try:
-                    send_message(vk, new_status_message)
-                    last_status = new_status_message
-                except Exception as send_error:
-                    logging.error(
-                        'Не удалось отправить сообщение об ошибке в VK: '
-                        f'{send_error}'
-                    )
-            else:
-                logger.debug('Статус не изменился, сообщение не отправляем.')
-        except ApiResponseError as error:
-            logger.error(f'Ошибка API: {error}')
-            now = time.time()
-            if (last_error_sent_at is None) or (
-                now - last_error_sent_at >= error_cooldown_seconds
-            ):
-                send_message(vk, VK_USER_ID, f'⚠️ Сбой в работе бота: {error}')
-                last_error_sent_at = now
-            else:
-                logger.debug(
-                    'Пропускаем повторную отправку сообщения об ошибке.'
-                )
-        except Exception as error:
-            logger.critical(
-                f'Неизвестная ошибка в цикле бота: {error}', exc_info=True
-            )
-            try:
-                send_message(
-                    vk, VK_USER_ID, f'💥 Критическая ошибка бота: {error}'
-                )
-            except Exception:
-                pass
+                send_message(vk, new_status_message)
+                last_status = new_status_message
+                status_changed = True
+                break
+
+        if not status_changed:
+            logging.debug('Статус не изменился, сообщение не отправляем.')
         time.sleep(RETRY_PERIOD)
 
 
