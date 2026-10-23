@@ -1,7 +1,3 @@
-class TokenError(Exception):
-    """Не хватает токенов или они некорректны."""
-
-
 class ApiRequestError(Exception):
     """Сбой при выполнении запроса к API."""
 
