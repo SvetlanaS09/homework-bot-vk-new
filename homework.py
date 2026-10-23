@@ -27,7 +27,6 @@ RETRY_PERIOD = 600
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
 
-
 HOMEWORK_VERDICTS = {
     'approved': 'Работа проверена: ревьюеру всё понравилось. Ура!',
     'reviewing': 'Работа взята на проверку ревьюером.',
@@ -35,22 +34,21 @@ HOMEWORK_VERDICTS = {
 }
 
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s, %(levelname)s, %(message)s, %(name)s',
-    datefmt='%Y-%m-%d %H:%M:%S',
-    handlers=[logging.StreamHandler()]
-)
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
 
 
-def check_tokens() -> None:
+def check_tokens() -> bool:
     """Проверяет наличие всех обязательных переменных окружения."""
-    return all((PRACTICUM_TOKEN, VK_TOKEN, VK_USER_ID))
+    required_vars = ['PRACTICUM_TOKEN', 'VK_TOKEN', 'VK_USER_ID']
+    missing = [var for var in required_vars if not globals()[var]]
+    if missing:
+        msg = f'Отсутствуют переменные окружения: {", ".join(missing)}'
+        logger.critical(msg)
+        return False
+    return True
 
 
-def send_message(vk, message: str) -> None:
+def send_message(vk: Any, message: str) -> None:
     """Отправляет сообщение в VK пользователю."""
     try:
         random_id = random.randint(0, 100000)
@@ -64,11 +62,15 @@ def send_message(vk, message: str) -> None:
         logger.error(f'Не удалось отправить сообщение в VK: {e}')
 
 
-def get_api_answer(timestamp):
+def get_api_answer(timestamp: int) -> Dict[str, Any]:
     """Делает запрос к API и возвращает ответ, приведённый к типам Python."""
-    params = {'from_date': timestamp}
+    request_kwargs = {
+        "url": ENDPOINT,
+        "headers": HEADERS,
+        "params": {"from_date": timestamp},
+    }
     try:
-        response = requests.get(ENDPOINT, headers=HEADERS, params=params)
+        response = requests.get(**request_kwargs)
     except requests.RequestException as error:
         raise ApiRequestError(
             f'Сбой при запросе к эндпоинту {ENDPOINT}: {error}'
@@ -97,7 +99,7 @@ def check_response(response: Dict[str, Any]) -> None:
         raise ApiResponseError(msg)
     if not isinstance(response['homeworks'], list):
         msg = (
-            f'Значение ключа "homeworks" должно быть списком, '
+            'Значение ключа "homeworks" должно быть списком,'
             f'получен тип {type(response["homeworks"]).__name__}'
         )
         logger.error(msg)
@@ -106,10 +108,7 @@ def check_response(response: Dict[str, Any]) -> None:
 
 
 def parse_status(homework: Dict[str, Any]) -> str:
-    """
-    Извлекает статус домашней работы.
-    Возвращает строку-сообщение для отправки в VK.
-    """
+    """Извлекает статус домашней работы и возвращает сообщение для VK."""
     if 'homework_name' not in homework:
         logger.error('В ответе API отсутствует ключ "homework_name"')
         raise KeyError(
@@ -130,7 +129,7 @@ def parse_status(homework: Dict[str, Any]) -> str:
     return f'Изменился статус проверки работы "{title}". {verdict}'
 
 
-def main() -> None:
+def main() -> None:  # noqa: C901
     """Формируется основная логика работы бота."""
     if not check_tokens():
         logging.critical(
@@ -146,36 +145,54 @@ def main() -> None:
     last_status: Optional[str] = None
 
     while True:
-        response = get_api_answer(from_date)
-        check_response(response)
+        try:
+            response = get_api_answer(from_date)
+            check_response(response)
+        except Exception:
+            logger.exception('Ошибка при получении или проверке ответа API ')
+            time.sleep(RETRY_PERIOD)
+            continue
         homeworks: List[Dict[str, Any]] = response.get('homeworks', [])
-        current_date = response['current_date']
-        from_date = current_date
+        current_date = response.get('current_date')
+
+        if current_date is None:
+            logger.error('Ответ API не содержит current_date, пропуск шага')
+            time.sleep(RETRY_PERIOD)
+            continue
+
         if not homeworks:
             if last_status is not None:
-                logging.debug(
-                    'Статус домашних работ не изменился: список пуст'
-                )
+                logger.debug('Статус домашних работ не изменился: список пуст')
             else:
-                logging.debug(
-                    'Список домашних работ пуст, начальное состояние'
-                )
+                logger.debug('Список домашних работ пуст, начальное состояние')
+            from_date = current_date
             time.sleep(RETRY_PERIOD)
             continue
 
         status_changed = False
         for homework in homeworks:
-            new_status_message = parse_status(homework)
-            if new_status_message != last_status:
-                send_message(vk, new_status_message)
-                last_status = new_status_message
-                status_changed = True
-                break
+            try:
+                new_status_message = parse_status(homework)
+                if new_status_message != last_status:
+                    send_message(vk, new_status_message)
+                    last_status = new_status_message
+                    status_changed = True
+                    break
+            except Exception as e:
+                logger.exception(f'Ошибка при разборе статуса для работы: {e}')
+                continue
 
         if not status_changed:
             logging.debug('Статус не изменился, сообщение не отправляем.')
         time.sleep(RETRY_PERIOD)
+        from_date = response['current_date']
 
 
 if __name__ == '__main__':
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s, %(levelname)s, %(message)s, %(name)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+        handlers=[logging.StreamHandler()]
+    )
     main()
